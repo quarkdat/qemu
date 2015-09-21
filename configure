@@ -337,6 +337,7 @@ libssh2=""
 vhdx=""
 numa=""
 tcmalloc="no"
+shake=""
 
 # parse CC options first
 for opt do
@@ -1143,6 +1144,10 @@ for opt do
   ;;
   --enable-tcmalloc) tcmalloc="yes"
   ;;
+  --disable-shake) shake="no"
+  ;;
+  --enable-shake) shake="yes"
+  ;;
   *)
       echo "ERROR: unknown option $opt"
       echo "Try '$0 --help' for more information"
@@ -1367,6 +1372,7 @@ disabled with --disable-FEATURE, default is enabled if available:
   vhdx            support for the Microsoft VHDX image format
   numa            libnuma support
   tcmalloc        tcmalloc support
+  shake           shake block device 
 
 NOTE: The object files are built at the place where configure is launched
 EOF
@@ -3412,6 +3418,29 @@ EOF
 fi
 
 ##########################################
+# shake probe
+if test "$shake" != "no" ; then
+  cat > $TMPC <<EOF
+#include <stdio.h>
+#include <shake.h>
+int main(void) {
+    shake_enable();
+    return 0;
+}
+EOF
+  shake_libs="-lshake -luv "
+  shake_cflags="-I/home/zhu/git/quarkdat/shake/src/lib/"
+  if compile_prog "" "$shake_libs  $shake_cflags" ; then
+    shake=yes
+  else
+    if test "$shake" = "yes" ; then
+      feature_not_found "shake block device" "Install libshake devel"
+    fi
+    shake=no
+  fi
+fi
+
+##########################################
 # signalfd probe
 signalfd="no"
 cat > $TMPC << EOF
@@ -4629,6 +4658,7 @@ echo "snappy support    $snappy"
 echo "bzip2 support     $bzip2"
 echo "NUMA host support $numa"
 echo "tcmalloc support  $tcmalloc"
+echo "shake support     $shake"
 
 if test "$sdl_too_old" = "yes"; then
 echo "-> Your SDL version is too old - please upgrade to have SDL support"
@@ -5040,6 +5070,11 @@ if test "$rbd" = "yes" ; then
   echo "CONFIG_RBD=m" >> $config_host_mak
   echo "RBD_CFLAGS=$rbd_cflags" >> $config_host_mak
   echo "RBD_LIBS=$rbd_libs" >> $config_host_mak
+fi
+if test "$shake" = "yes" ; then
+  echo "CONFIG_SHAKE=m" >> $config_host_mak
+  echo "SHAKE_CFLAGS=$shake_cflags" >> $config_host_mak
+  echo "SHAKE_LIBS=$shake_libs" >> $config_host_mak
 fi
 
 echo "CONFIG_COROUTINE_BACKEND=$coroutine" >> $config_host_mak

@@ -21,7 +21,7 @@ typedef struct ShakeImage {
 } ShakeImage;
 
 typedef struct ShakeAIOCB {
-    BlockDriverAIOCB common;
+    BlockAIOCB common;
     QEMUBH *bh;
     QEMUIOVector *qiov;
     struct ShakeImage *si;
@@ -50,6 +50,7 @@ static int qemu_shake_parsename(const char *filename,
                                 int name_len,
                                 Error **errp)
 {
+    /* error_report(" ===== qemu_shake_parsename"); // TODO */
     const char *start;
 
     if (!strstart(filename, "shake:", &start)) {
@@ -58,7 +59,7 @@ static int qemu_shake_parsename(const char *filename,
     }
 
     if (strlen(start) > name_len) {
-        error_setg(errp, "%s too long", start)
+        error_setg(errp, "%s too long", start);
         return -EINVAL;
     }
 
@@ -69,53 +70,58 @@ static int qemu_shake_parsename(const char *filename,
 
 static void qemu_shake_cleanup(ShakeImage *si)
 {
+    /* error_report(" ===== qemu_shake_cleanup"); // TODO */
     if (si) {
         if (si->img) img_close(si->img);
     }
 }
 
-static int qemu_shake_open(BlockDriverState *bs, QDict *options, int flags)
+static int qemu_shake_open(BlockDriverState *bs, QDict *options, int flags,
+                           Error **errp)
 {
+    /* error_report(" ===== qemu_shake_open "); // TODO */
+
     ShakeImage *si = bs->opaque;
     const char *filename;
     QemuOpts *opts;
     Error *local_err = NULL;
-    int r = 0;
 
     //过滤options
-    opts = qemu_opts_create_nofail(&runtime_opts);
+    opts = qemu_opts_create(&runtime_opts, NULL, 0, &error_abort);
     qemu_opts_absorb_qdict(opts, options, &local_err);
-    if (error_is_set(&local_err)) {
-        qerror_report_err(local_err);
-        error_free(local_err);
+    if (local_err) {
+        error_propagate(errp, local_err);
         qemu_opts_del(opts);
         return -EINVAL;
     }
 
     // filename的格式是 shake:/{image_name}
     filename = qemu_opt_get(opts, "filename");
-    if (qemu_shake_parsename(filename, si->name, MAX_IMG_NAME_SIZE - 1) < 0) {
+    if (qemu_shake_parsename(filename, si->name, MAX_SHAKE_IMG_NAME_SIZE - 1, &local_err) < 0) {
+        error_propagate(errp, local_err);
+        qemu_opts_del(opts);
         return -EINVAL;
     }
+
+    // 启动shake
+    shake_enable();
 
     //调用img_open,跟image连接
     si->img = NULL;
     si->img = img_open(si->name, 0, IO_CALL_BACK_MODE);
     if (si->img == NULL) {
-        r = -EIO;
         error_report("error open shake img");
-        goto failed;
+        qemu_shake_cleanup(si);
+        qemu_opts_del(opts);
+        return -EIO;
     }
+    /* error_report(" ===== open shake img successful!!!"); // TODO */
     return 0;
-
-failed:
-    qemu_shake_cleanup(si);
-    qemu_opts_del(opts);
-    return r;
 }
 
 static void qemu_shake_close(BlockDriverState *bs)
 {
+    /* error_report(" ===== qemu_shake_close"); // TODO */
     ShakeImage *si = bs->opaque;
     if (si->img) img_close(si->img);
 }
@@ -127,6 +133,7 @@ static const AIOCBInfo shake_aiocb_info = {
 // This function runs in qemu BH context.
 static void shake_finish_bh(void *opaque)
 {
+    /* error_report(" ===== shake_finish_bh"); // TODO */
     ShakeAIOCB *acb = opaque;
     qemu_bh_delete(acb->bh);
     if (acb->cmd == SHAKE_AIO_READ) {
@@ -135,7 +142,7 @@ static void shake_finish_bh(void *opaque)
         qemu_iovec_from_buf(acb->qiov, 0, acb->buf, acb->qiov->size);
     }
     qemu_vfree(acb->buf);
-    acb->common.cb(acb->common.opaque, (acb->ret > 0 ? 0 : -EIO));
+    acb->common.cb(acb->common.opaque, (acb->ret == 0 ? 0 : -EIO)); // TODO we need think acb->ret
     qemu_aio_unref(acb);
 }
 
@@ -149,10 +156,11 @@ static void shake_finish_bh(void *opaque)
  */
 static void shake_finish_aiocb(img_iocb_t *iocb)
 {
-    ShakeAIOCB *acb = img_iocb_get_udata(iocb);
+    /* error_report(" ===== shake_finish_aiocb"); // TODO */
+    ShakeAIOCB *acb = img_get_iocb_udata(iocb);
 
     //获取result
-    acb->ret = img_iocb_get_result(iocb);
+    acb->ret = img_get_iocb_result(iocb);
     
     // schedule a BH, notify the QEMU IO thread to finish the bh
     acb->bh = aio_bh_new(bdrv_get_aio_context(acb->common.bs),
@@ -161,14 +169,15 @@ static void shake_finish_aiocb(img_iocb_t *iocb)
     qemu_bh_schedule(acb->bh);
 }
 
-static BlockDriverAIOCB *shake_start_aio(BlockDriverState *bs,
+static BlockAIOCB *shake_start_aio(BlockDriverState *bs,
                                          int64_t sector_num,
                                          QEMUIOVector *qiov,
                                          int nb_sectors,
-                                         BlockDriverCompletionFunc *cb,
+                                         BlockCompletionFunc *cb,
                                          void *opaque,
-                                         WWAIOCmd cmd)
+                                         ShakeAIOCmd cmd)
 {
+    /* error_report(" ===== shake_start_aio"); // TODO */
     ShakeImage *si = bs->opaque;
     ShakeAIOCB *acb = qemu_aio_get(&shake_aiocb_info, bs, cb, opaque);
     acb->cmd = cmd;
@@ -202,6 +211,8 @@ static BlockDriverAIOCB *shake_start_aio(BlockDriverState *bs,
             goto failed;
     }
 
+    img_set_iocb_udata(&acb->iocb, acb);
+
     img_iocb_t *iocbs[1] = {&acb->iocb};
     img_io_submit(si->img, 1, iocbs);
     return &acb->common;
@@ -212,43 +223,49 @@ failed:
     return NULL;
 }
 
-static BlockDriverAIOCB *qemu_shake_aio_readv(BlockDriverState *bs,
+static BlockAIOCB *qemu_shake_aio_readv(BlockDriverState *bs,
                                               int64_t sector_num,
                                               QEMUIOVector *qiov,
                                               int nb_sectors,
-                                              BlockDriverCompletionFunc *cb,
+                                              BlockCompletionFunc *cb,
                                               void *opaque)
 {
+    /* error_report(" ===== qemu_shake_aio_readv"); // TODO */
     return shake_start_aio(bs, sector_num, qiov, nb_sectors, cb, opaque,
                            SHAKE_AIO_READ);
 }
 
-static BlockDriverAIOCB *qemu_shake_aio_writev(BlockDriverState *bs,
+static BlockAIOCB *qemu_shake_aio_writev(BlockDriverState *bs,
                                                int64_t sector_num,
                                                QEMUIOVector *qiov,
                                                int nb_sectors,
-                                               BlockDriverCompletionFunc *cb,
+                                               BlockCompletionFunc *cb,
                                                void *opaque)
 {
+    /* error_report(" ===== qemu_shake_aio_writev"); // TODO */
     return shake_start_aio(bs, sector_num, qiov, nb_sectors, cb, opaque,
                            SHAKE_AIO_WRITE);
 }
 
 static int qemu_shake_getinfo(BlockDriverState *bs, BlockDriverInfo *bdi)
 {
+    /* error_report(" ===== qemu_shake_getinfo"); // TODO */
     ShakeImage *si = bs->opaque;
-    bdi->cluster_size = si->img.obj_size;
+    bdi->cluster_size = si->img->obj_size;
     return 0;
 }
 
 static int64_t qemu_shake_getlength(BlockDriverState *bs)
 {
+    /* error_report(" ===== qemu_shake_getlength"); // TODO */
     ShakeImage *si = bs->opaque;
-    return si->img.size;
+    si->img->size = 33391104; //TODO
+    return si->img->size;
 }
 
 static int qemu_shake_truncate(BlockDriverState *bs, int64_t offset)
 {
+    /* error_report(" ===== qemu_shake_truncate"); // TODO */
     ShakeImage *si = bs->opaque;
     int r = img_resize(si->img, offset);
     if (r < 0) return r;
@@ -257,15 +274,16 @@ static int qemu_shake_truncate(BlockDriverState *bs, int64_t offset)
 
 static int qemu_shake_create(const char *filename, QemuOpts *opts, Error **errp)
 {
-    char name[MAX_IMG_NAME_SIZE];
+    /* error_report(" ===== qemu_shake_create"); // TODO */
+    char name[MAX_SHAKE_IMG_NAME_SIZE];
     int64_t img_size = 0;
     int64_t obj_size = 0;
     int r = 0;
-    Error *local_err = NULL:
+    Error *local_err = NULL;
 
     if (qemu_shake_parsename(filename,
                              name,
-                             MAX_IMG_NAME_SIZE - 1,
+                             MAX_SHAKE_IMG_NAME_SIZE - 1,
                              &local_err) < 0) {
         error_propagate(errp, local_err);
         return -EINVAL;
